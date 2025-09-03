@@ -2,11 +2,10 @@
 """
 dbt Project Evaluator Rules Management App
 
-A Streamlit application for managing dbt project evaluator rules.
-Users can view, add, edit, and delete rules across different categories.
+A Streamlit application for managing dbt_project_evaluator rules.
+Users can view rules across different evaluation categories.
 
-Author: AI Assistant
-Date: 2025
+Date: Sept. 3, 2025
 """
 
 import streamlit as st
@@ -15,11 +14,24 @@ import uuid
 from typing import Dict, List, Any, Optional
 from io import StringIO
 import pandas as pd
-import snowflake.connector
-from snowflake.connector.pandas_tools import pd_writer
 import os
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+# Try to import Snowflake connector, but don't fail if not available (for Snowflake Native App)
+try:
+    import snowflake.connector
+    from snowflake.connector.pandas_tools import pd_writer
+    SNOWFLAKE_CONNECTOR_AVAILABLE = True
+except ImportError:
+    SNOWFLAKE_CONNECTOR_AVAILABLE = False
+
+# Environment detection
+IS_SNOWFLAKE_NATIVE = False
+try:
+    # Snowflake Native Streamlit sets this env var
+    if os.environ.get("SNOWFLAKE_STREAMLIT") == "1":
+        IS_SNOWFLAKE_NATIVE = True
+except Exception:
+    pass
 
 # Configure the page
 st.set_page_config(
@@ -435,31 +447,35 @@ def connect_to_snowflake_manual(account: str, user: str, auth_method: str, **aut
         dismissible_error(f"Failed to connect to Snowflake: {str(e)}", key="snowflake_connection_manual")
         return False
 
+# Unified query execution for both environments
+
 def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
-    """Execute a query on Snowflake and return results as DataFrame"""
-    if not st.session_state.get("snowflake_connected"):
-        dismissible_warning("Not connected to Snowflake", key="not_connected_warning")
-        return None
-    
-    try:
-        conn = st.session_state.snowflake_conn
-        cursor = conn.cursor()
-        cursor.execute(query)
-        
-        # Get column names
-        columns = [col[0] for col in cursor.description]
-        
-        # Fetch all results
-        results = cursor.fetchall()
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(results, columns=columns)
-        cursor.close()
-        
-        return df
-    except Exception as e:
-        st.error(f"Query execution failed: {str(e)}")
-        return None
+    """Execute a query on Snowflake and return results as DataFrame (supports both local and Snowflake Native)"""
+    if IS_SNOWFLAKE_NATIVE:
+        try:
+            conn = st.connection("snowflake")
+            df = conn.query(query, ttl=600)
+            return df
+        except Exception as e:
+            st.error(f"Query execution failed (Snowflake Native): {str(e)}")
+            return None
+    else:
+        # Local/manual connection
+        if not st.session_state.get("snowflake_connected"):
+            dismissible_warning("Not connected to Snowflake", key="not_connected_warning")
+            return None
+        try:
+            conn = st.session_state.snowflake_conn
+            cursor = conn.cursor()
+            cursor.execute(query)
+            columns = [col[0] for col in cursor.description]
+            results = cursor.fetchall()
+            df = pd.DataFrame(results, columns=columns)
+            cursor.close()
+            return df
+        except Exception as e:
+            st.error(f"Query execution failed: {str(e)}")
+            return None
 
 def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
     """Get emoji and title based on violations count"""
@@ -916,7 +932,6 @@ def display_snowflake_connection_sidebar():
                     if try_secrets_connection():
                         dismissible_success("Connected using secrets.toml!", key="secrets_connection_success")
                         st.rerun()
-                st.sidebar.markdown("---")
         except:
             pass
         
@@ -1081,7 +1096,7 @@ def main():
     """Main application function"""
     # Don't show main header for dashboard (it has its own)
     if st.session_state.get('nav_mode') != "Dashboard":
-        st.markdown('<h1 class="main-header">📊 dbt Project Evaluator Rules Manager</h1>', unsafe_allow_html=True)
+        st.markdown('<h1 class="main-header">📊 dbt Project Evaluator Results</h1>', unsafe_allow_html=True)
     
     # Initialize Snowflake connection early
     init_snowflake_connection()

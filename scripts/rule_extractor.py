@@ -12,8 +12,10 @@ Date: 2025
 import requests
 import re
 import json
+import os
 from typing import Dict, List, Optional
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -69,6 +71,37 @@ class DBTRuleParser:
         
         return rules
 
+    def _download_and_replace_images(self, text: str, rule_key: str) -> str:
+        """Download images in markdown and replace their links with local paths"""
+        image_pattern = r'!\[([^\]]*)\]\((https?://[^)]+)\)(\{[^}]*\})?'
+        images_dir = os.path.join(os.path.dirname(__file__), '../images')
+        os.makedirs(images_dir, exist_ok=True)
+        def replacer(match):
+            alt_text = match.group(1)
+            url = match.group(2)
+            suffix = match.group(3) or ''
+            parsed_url = urlparse(url)
+            ext = os.path.splitext(parsed_url.path)[1]
+            # Use rule_key and alt_text for filename uniqueness
+            safe_alt = re.sub(r'[^a-zA-Z0-9_-]', '_', alt_text)[:30]
+            filename = f"{rule_key}_{safe_alt}{ext}" if safe_alt else f"{rule_key}{ext}"
+            local_path = os.path.join(images_dir, filename)
+            rel_path = f"images/{filename}"
+            # Download image if not already present
+            if not os.path.exists(local_path):
+                try:
+                    resp = requests.get(url, timeout=30)
+                    resp.raise_for_status()
+                    with open(local_path, 'wb') as f:
+                        f.write(resp.content)
+                    print(f"    ✓ Downloaded image: {url} -> {rel_path}")
+                except Exception as e:
+                    print(f"    ✗ Failed to download image: {url} ({e})")
+                    return match.group(0)  # Keep original if download fails
+            # Replace markdown link with local path
+            return f"![{alt_text}]({rel_path}){suffix}"
+        return re.sub(image_pattern, replacer, text)
+
     def _parse_single_rule(self, section: str) -> Optional[Rule]:
         """Parse a single rule section"""
         lines = section.strip().split('\n')
@@ -89,18 +122,22 @@ class DBTRuleParser:
         # Extract example section
         example_match = re.search(r'\*\*Example\*\*\s*\n\n([^*]+?)(?=\n\*\*|\n---|$)', section, re.DOTALL)
         example = example_match.group(1).strip() if example_match else "Example not specified in documentation"
+        example = self._download_and_replace_images(example, table_name)
         
         # Extract exception section
         exception_match = re.search(r'\*\*Exception[s]?\*\*\s*\n\n([^*]+?)(?=\n\*\*|\n---|$)', section, re.DOTALL)
         exception = exception_match.group(1).strip() if exception_match else "Not specified in documentation"
+        exception = self._download_and_replace_images(exception, table_name)
         
         # Extract reason to flag
         reason_match = re.search(r'\*\*Reason to Flag\*\*\s*\n\n([^*]+?)(?=\n\*\*|\n---|$)', section, re.DOTALL)
         reason_to_flag = reason_match.group(1).strip() if reason_match else f"This pattern violates dbt best practices for {name.lower()}"
+        reason_to_flag = self._download_and_replace_images(reason_to_flag, table_name)
         
         # Extract remediation
         remediation_match = re.search(r'\*\*How to Remediate\*\*\s*\n\n([^*]+?)(?=\n\*\*|\n---|$)', section, re.DOTALL)
         remediation = remediation_match.group(1).strip() if remediation_match else f"Follow dbt best practices to resolve {name.lower()} issues"
+        remediation = self._download_and_replace_images(remediation, table_name)
         
         return Rule(
             name=name,
@@ -158,14 +195,23 @@ class DBTRuleParser:
         
         return result
 
-    def save_to_file(self, data: Dict, filename: str = "dbt_project_evaluator_rules.json"):
-        """Save the generated data to a JSON file"""
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            print(f"✓ Successfully saved to {filename}")
-        except Exception as e:
-            print(f"✗ Error saving to file: {e}")
+    def save_to_file(self, data: Dict, filename: str = None):
+        """Save the generated data to a JSON file in the config folder (tries ../config then ./config)"""
+        tried_paths = []
+        if filename is None:
+            paths = ["../config/dbt_project_evaluator_rules.json", "./config/dbt_project_evaluator_rules.json"]
+        else:
+            paths = [filename]
+        for path in paths:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                print(f"✓ Successfully saved to {path}")
+                return
+            except Exception as e:
+                print(f"✗ Error saving to file: {e}")
+                tried_paths.append(path)
+        print(f"❌ Could not save to any of the following paths: {tried_paths}")
 
 
 def main():

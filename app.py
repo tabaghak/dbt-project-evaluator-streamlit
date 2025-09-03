@@ -84,7 +84,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # File path for the JSON data
-JSON_FILE_PATH = "dbt_project_evaluator_rules.json"
+JSON_FILE_PATH = "config/dbt_project_evaluator_rules.json"
 
 @st.cache_data
 def load_rules_data() -> Dict[str, Any]:
@@ -907,7 +907,12 @@ def display_snowflake_connection_sidebar():
     """Display Snowflake connection form in sidebar"""
     st.sidebar.markdown("---")
     st.sidebar.subheader("🏔️ Snowflake Connection")
-    
+
+    if IS_SNOWFLAKE_NATIVE:
+        st.sidebar.success("✅ Connected via Snowflake Native App session")
+        st.sidebar.info("Manual connection is disabled in Snowflake Native Apps.")
+        return True
+
     if st.session_state.get("snowflake_connected"):
         connection_type = "🔐 Secrets Configuration" if st.session_state.get("secrets_connected") else "🔧 Manual Configuration"
         st.sidebar.success(f"✅ Connected ({connection_type})")
@@ -1010,10 +1015,6 @@ def display_snowflake_connection_sidebar():
                 st.caption("⚠️ Please fill in all required fields to connect.")
         
         return False
-
-# Removed display_rule_form function as app is now read-only
-
-
 
 def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     """Display rule in read-only viewer mode"""

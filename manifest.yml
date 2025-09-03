@@ -1,0 +1,33 @@
+artifacts:
+  - app.py
+  - dbt_project_evaluator_rules.json
+  - rule_extractor.py
+  - requirements.txt
+
+streamlit:
+  entry_point: app.py
+
+dependencies:
+  - python=3.8
+  - pip:
+      - -r requirements.txt
+
+app:
+  name: dbt-project-evaluator-streamlit
+  label: "dbt Project Evaluator Streamlit"
+  description: "Visualize dbt Project Evaluator results in Snowflake using Streamlit."
+  icon: "https://raw.githubusercontent.com/tabaghak/dbt-project-evaluator-streamlit/main/icon.png"
+  tags:
+    - dbt
+    - streamlit
+    - snowflake
+    - data quality
+  version: 1.0.0
+  author: "Edgar Taboada"
+  homepage: "https://github.com/tabaghak/dbt-project-evaluator-streamlit"
+  license: "MIT"
+
+permissions:
+  - access_database
+  - access_schema
+

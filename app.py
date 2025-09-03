@@ -15,6 +15,7 @@ from typing import Dict, List, Any, Optional
 from io import StringIO
 import pandas as pd
 import os
+import re
 
 # Try to import Snowflake connector, but don't fail if not available (for Snowflake Native App)
 try:
@@ -162,7 +163,7 @@ def dismissible_error(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"🚨 {message}", key=f"dismiss_error_{key}", 
-                    type="secondary", use_container_width=True):
+                    type="secondary", width='stretch'):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -203,7 +204,7 @@ def dismissible_warning(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"⚠️ {message}", key=f"dismiss_warning_{key}", 
-                    type="secondary", use_container_width=True):
+                    type="secondary", width='stretch'):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -244,7 +245,7 @@ def dismissible_info(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"ℹ️ {message}", key=f"dismiss_info_{key}", 
-                    type="secondary", use_container_width=True):
+                    type="secondary", width='stretch'):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -285,7 +286,7 @@ def dismissible_success(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"✅ {message}", key=f"dismiss_success_{key}", 
-                    type="secondary", use_container_width=True):
+                    type="secondary", width='stretch'):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -447,6 +448,10 @@ def connect_to_snowflake_manual(account: str, user: str, auth_method: str, **aut
         dismissible_error(f"Failed to connect to Snowflake: {str(e)}", key="snowflake_connection_manual")
         return False
 
+# Session database and schema (default values)
+SESSION_DATABASE = "DBT_SOURCE_PROJECT_EVAL"
+SESSION_SCHEMA = "RESULTS"
+
 # Unified query execution for both environments
 
 def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
@@ -477,6 +482,11 @@ def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
             st.error(f"Query execution failed: {str(e)}")
             return None
 
+# Helper to build fully qualified table name
+
+def fq_table(table: str) -> str:
+    return f"{SESSION_DATABASE}.{SESSION_SCHEMA}.{table}"
+
 def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
     """Get emoji and title based on violations count"""
     if not st.session_state.get("snowflake_connected"):
@@ -494,7 +504,7 @@ def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
     else:
         # Try to load violations data quickly
         try:
-            query = f"SELECT * FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.{rule_key}"
+            query = f"SELECT * FROM {fq_table(rule_key)}"
             df = execute_snowflake_query(query)
             if df is not None:
                 st.session_state[violations_key] = df
@@ -537,7 +547,7 @@ def preload_violations_for_rules(rules_data: Dict[str, Any]):
                 
                 # Skip if already loaded
                 if f"violations_{rule_key}" not in st.session_state:
-                    query = f"SELECT * FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.{rule_key}"
+                    query = f"SELECT * FROM {fq_table(rule_key)}"
                     df = execute_snowflake_query(query)
                     if df is not None:
                         st.session_state[f"violations_{rule_key}"] = df
@@ -613,11 +623,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         doc_coverage = 0
         doc_status = "No Data"
         try:
-            doc_query = """
-            SELECT * FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.FCT_DOCUMENTATION_COVERAGE
-            ORDER BY MEASURED_AT DESC
-            LIMIT 1
-            """
+            doc_query = f"SELECT * FROM {fq_table('FCT_DOCUMENTATION_COVERAGE')} ORDER BY MEASURED_AT DESC LIMIT 1"
             doc_df = execute_snowflake_query(doc_query)
             if doc_df is not None and not doc_df.empty:
                 # Assuming the coverage is in a column - adjust column name as needed
@@ -679,18 +685,14 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             ]
         )
         
-        st.plotly_chart(fig_doc, use_container_width=True)
+        st.plotly_chart(fig_doc, width='stretch')
     
     with col2:
         # Test Coverage - get real data from Snowflake and display as doughnut chart
         test_coverage = 0
         test_status = "No Data"
         try:
-            test_query = """
-            SELECT * FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.FCT_TEST_COVERAGE
-            ORDER BY MEASURED_AT DESC
-            LIMIT 1
-            """
+            test_query = f"SELECT * FROM {fq_table('FCT_TEST_COVERAGE')} ORDER BY MEASURED_AT DESC LIMIT 1"
             test_df = execute_snowflake_query(test_query)
             if test_df is not None and not test_df.empty:
                 # Look for coverage columns
@@ -750,18 +752,14 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             ]
         )
         
-        st.plotly_chart(fig_test, use_container_width=True)
+        st.plotly_chart(fig_test, width='stretch')
     
     with col3:
         # Total Models - get real data from Snowflake
         total_models = 0
         model_status = "No Data"
         try:
-            models_query = """
-            SELECT COUNT(1) AS models
-            FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.INT_ALL_GRAPH_RESOURCES
-            WHERE resource_type = 'model'
-            """
+            models_query = f"SELECT COUNT(1) AS models FROM {fq_table('INT_ALL_GRAPH_RESOURCES')} WHERE resource_type = 'model'"
             models_df = execute_snowflake_query(models_query)
             if models_df is not None and not models_df.empty:
                 total_models = int(models_df['MODELS'].iloc[0])
@@ -838,7 +836,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
                 yaxis_title="Category"
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.success("🎉 No violations found across all categories!")
     else:
@@ -862,7 +860,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         for category in detail_df["Category"].unique():
             cat_data = detail_df[detail_df["Category"] == category]
             with st.expander(f"{category} ({cat_data['Violations'].sum()} violations)"):
-                st.dataframe(cat_data[["Rule", "Violations"]], hide_index=True, use_container_width=True)
+                st.dataframe(cat_data[["Rule", "Violations"]], hide_index=True, width='stretch')
     else:
         st.success("🎉 No rule violations detected!")
     
@@ -900,7 +898,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
                 "showlegend": True
             }
         }, 
-        use_container_width=True
+        width='stretch'
     )
 
 def display_snowflake_connection_sidebar():
@@ -1004,7 +1002,7 @@ def display_snowflake_connection_sidebar():
                 connect_enabled = all([account, user, token, warehouse, database, schema])
             
             # Connect button
-            if st.button("Connect to Snowflake", disabled=not connect_enabled):
+            if st.button("Connect to Snowflake", disabled=not connect_enabled, width='stretch'):
                 if connect_to_snowflake_manual(account, user, auth_method, **auth_params):
                     dismissible_success("Connected successfully!", key="manual_connection_success")
                     st.rerun()
@@ -1016,6 +1014,26 @@ def display_snowflake_connection_sidebar():
         
         return False
 
+def render_markdown_with_images(md_text):
+    """Render markdown and display images using st.image for local images with { width=... }"""
+    import streamlit as st
+    image_pattern = r'!\[([^\]]*)\]\((images/[^)]+)\)(\{[^}]*\})?'
+    def image_replacer(match):
+        alt_text = match.group(1)
+        img_path = match.group(2)
+        attr = match.group(3)
+        width = None
+        if attr:
+            width_match = re.search(r'width\s*=\s*(\d+)', attr)
+            if width_match:
+                width = int(width_match.group(1))
+        st.image(img_path, caption=alt_text, width=width)
+        return ''  # Remove from markdown
+    # Render images first
+    md_text = re.sub(image_pattern, image_replacer, md_text)
+    # Render remaining markdown
+    st.markdown(md_text, unsafe_allow_html=True)
+
 def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     """Display rule in read-only viewer mode"""
     # Create tabs for different content sections
@@ -1023,23 +1041,23 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     
     with tab1:
         st.markdown("### Description")
-        st.markdown(rule_data.get("description", "No description available"))
+        render_markdown_with_images(rule_data.get("description", "No description available"))
     
     with tab2:
         st.markdown("### Example")
-        st.markdown(rule_data.get("example", "No example available"))
+        render_markdown_with_images(rule_data.get("example", "No example available"))
     
     with tab3:
         st.markdown("### Exception")
-        st.markdown(rule_data.get("exception", "No exception specified"))
+        render_markdown_with_images(rule_data.get("exception", "No exception specified"))
     
     with tab4:
         st.markdown("### Reason to Flag")
-        st.markdown(rule_data.get("reason_to_flag", "No reason specified"))
+        render_markdown_with_images(rule_data.get("reason_to_flag", "No reason specified"))
     
     with tab5:
         st.markdown("### Remediation")
-        st.markdown(rule_data.get("remediation", "No remediation steps available"))
+        render_markdown_with_images(rule_data.get("remediation", "No remediation steps available"))
     
     with tab6:
         
@@ -1047,7 +1065,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
             st.info("Connect to Snowflake in the sidebar to view violations data")
         else:
             # Create the query
-            query = f"SELECT * FROM DBT_SOURCE_PROJECT_EVAL.RESULTS.{rule_key}"
+            query = f"SELECT * FROM {fq_table(rule_key)}"
             
             # Auto-load violations if not already loaded
             if f"violations_{rule_key}" not in st.session_state:
@@ -1059,7 +1077,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
             # Show query and refresh button
             col1, col2 = st.columns([1, 4])
             with col1:
-                if st.button(f"🔄 Refresh", key=f"refresh_{rule_key}"):
+                if st.button(f"🔄 Refresh", key=f"refresh_{rule_key}", width='content'):
                     with st.spinner("Refreshing violations data..."):
                         df = execute_snowflake_query(query)
                         if df is not None:
@@ -1080,7 +1098,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
                     # Display the data table
                     st.dataframe(
                         df, 
-                        use_container_width=True,
+                        width='stretch',
                         height=400
                     )
                                     
@@ -1090,7 +1108,8 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
                         label="📥 Download as CSV",
                         data=csv,
                         file_name=f"violations_{rule_key}.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        width='stretch'
                     )
 
 def main():
@@ -1135,7 +1154,7 @@ def main():
     
     if categories:
         # Dashboard button at the top
-        if st.sidebar.button("📊 Overview Dashboard", use_container_width=True,
+        if st.sidebar.button("📊 Overview Dashboard", width='stretch',
                             type="primary" if st.session_state.nav_mode == "Dashboard" else "secondary"):
             st.session_state.nav_mode = "Dashboard"
             st.rerun()
@@ -1167,7 +1186,7 @@ def main():
             </style>
             """, unsafe_allow_html=True)
             
-            if st.sidebar.button(f"{emoji} {category}", use_container_width=True, 
+            if st.sidebar.button(f"{emoji} {category}", width='stretch', 
                                 key=f"nav_{category}",
                                 type=button_type):
                 st.session_state.selected_category = category
@@ -1176,7 +1195,7 @@ def main():
         
         # Settings button at the bottom
         st.sidebar.markdown("---")
-        if st.sidebar.button("⚙️ Rule Settings", use_container_width=True):
+        if st.sidebar.button("⚙️ Rule Settings", width='stretch'):
             st.session_state.nav_mode = "Rule Settings"
             st.rerun()
         
@@ -1246,7 +1265,8 @@ def main():
                     label="Download JSON",
                     data=json_string,
                     file_name=f"dbt_rules_export_{'-'.join(export_options)}.json",
-                    mime="application/json"
+                    mime="application/json",
+                    width='stretch'
                 )
                 
                 with st.expander("Preview Export Data"):

@@ -16,6 +16,10 @@ from io import StringIO
 import pandas as pd
 import os
 import re
+import streamlit_plotly_events as spe
+from cryptography.hazmat.primitives import serialization
+import plotly.graph_objects as go
+import plotly.express as px
 
 # Try to import Snowflake connector, but don't fail if not available (for Snowflake Native App)
 try:
@@ -643,8 +647,6 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             doc_status = f"Error: {str(e)}"
         
         # Create doughnut chart for documentation coverage
-        import plotly.graph_objects as go
-        
         doc_color = "#2e7d32" if doc_coverage > 80 else "#c62828"
         
         fig_doc = go.Figure(data=[go.Pie(
@@ -761,7 +763,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         try:
             models_query = f"SELECT COUNT(1) AS models FROM {fq_table('INT_ALL_GRAPH_RESOURCES')} WHERE resource_type = 'model'"
             models_df = execute_snowflake_query(models_query)
-            if models_df is not None and not models_df.empty:
+            if models_df is not None and models_df.empty == False:
                 total_models = int(models_df['MODELS'].iloc[0])
                 if total_models > 100:
                     model_status = "Large project"
@@ -808,8 +810,6 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             df = pd.DataFrame(chart_data)
             
             # Create horizontal stacked bar chart using Plotly
-            import plotly.express as px
-            
             fig = px.bar(
                 df, 
                 x="Violations", 
@@ -867,39 +867,57 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
     # Project Structure Breakdown
     st.subheader("Project Structure Breakdown")
     st.markdown("**Distribution of Model Types**")
-    
-    # Simulated model type distribution (since we don't have this data in the rules)
-    model_types = {
-        "Intermediate": 55.0,
-        "Mart": 24.0,
-        "Staging": 14.0,
-        "Other": 7.0
-    }
-    
-    # Create pie chart using Streamlit's built-in chart
-    model_types_df = pd.DataFrame([
-        {"Model Type": model_type, "Count": percentage} 
-        for model_type, percentage in model_types.items()
-    ])
-    
-    # Use Streamlit's pie chart
-    st.plotly_chart(
-        {
-            "data": [
-                {
-                    "values": list(model_types.values()),
-                    "labels": list(model_types.keys()),
-                    "type": "pie",
-                    "name": "Model Types"
+
+    # Query all model data from Snowflake
+    models_query = f"""
+    SELECT model_type, database, REPLACE(schema, 'RESULTS_') AS schema, materialized, directory_path, file_name, number_lines, sql_complexity
+    FROM {fq_table('INT_ALL_GRAPH_RESOURCES')}
+    WHERE resource_type = 'model'
+    """
+    models_df = None
+    try:
+        models_df = execute_snowflake_query(models_query)
+    except Exception as e:
+        st.error(f"Error loading model details: {str(e)}")
+
+    # Pie chart: count per model_type
+    selected_model_type = None
+    if models_df is not None and not models_df.empty:
+        # Normalize column names to lowercase
+        models_df.columns = [col.lower() for col in models_df.columns]
+        model_type_col = "model_type" if "model_type" in models_df.columns else models_df.columns[0]
+        # Group by model_type and count unique models
+        model_type_counts = models_df.groupby(model_type_col).size().reset_index(name="count")
+        data_dict = dict(zip(model_type_counts['model_type'], model_type_counts['count']))
+        
+        # Create pie chart using Streamlit's built-in chart
+        model_types_df = pd.DataFrame([
+            {"Model Type": model_type, "Count": percentage} 
+            for model_type, percentage in data_dict.items()
+        ])
+
+        # Use Streamlit's pie chart
+        st.plotly_chart(
+            {
+                "data": [
+                    {
+                        "values": list(data_dict.values()),
+                        "labels": list(data_dict.keys()),
+                        "type": "pie",
+                        "name": "Model Types"
+                    }
+                ],
+                "layout": {
+                    "title": "Model Type Distribution",
+                    "showlegend": True
                 }
-            ],
-            "layout": {
-                "title": "Model Type Distribution",
-                "showlegend": True
-            }
-        }, 
-        width='stretch'
-    )
+            }, 
+            use_container_width=True
+        )
+
+        st.dataframe(models_df, width='stretch', hide_index=True)
+    else:
+        st.info("No model type data available.")
 
 def display_snowflake_connection_sidebar():
     """Display Snowflake connection form in sidebar"""
@@ -1015,8 +1033,7 @@ def display_snowflake_connection_sidebar():
         return False
 
 def render_markdown_with_images(md_text):
-    """Render markdown and display images using st.image for local images with { width=... }"""
-    import streamlit as st
+    """Render markdown and display images using st.image for local images with { width=... }, preserving image position."""
     image_pattern = r'!\[([^\]]*)\]\((images/[^)]+)\)(\{[^}]*\})?'
     def image_replacer(match):
         alt_text = match.group(1)
@@ -1027,12 +1044,22 @@ def render_markdown_with_images(md_text):
             width_match = re.search(r'width\s*=\s*(\d+)', attr)
             if width_match:
                 width = int(width_match.group(1))
-        st.image(img_path, caption=alt_text, width=width)
-        return ''  # Remove from markdown
-    # Render images first
-    md_text = re.sub(image_pattern, image_replacer, md_text)
-    # Render remaining markdown
-    st.markdown(md_text, unsafe_allow_html=True)
+        # Render image and return a unique placeholder
+        placeholder = f"[[IMAGE_PLACEHOLDER_{hash(img_path)}]]"
+        st.session_state[placeholder] = (img_path, alt_text, width)
+        return placeholder
+    # Replace images with placeholders
+    md_text_with_placeholders = re.sub(image_pattern, image_replacer, md_text)
+    # Split by placeholders and render in order
+    parts = re.split(r'(\[\[IMAGE_PLACEHOLDER_\-?\d+\]\])', md_text_with_placeholders)
+    for part in parts:
+        img_match = re.match(r'\[\[IMAGE_PLACEHOLDER_\-?\d+\]\]', part)
+        if img_match and part in st.session_state:
+            img_path, alt_text, width = st.session_state[part]
+            st.image(img_path, caption=alt_text, width=width)
+        else:
+            if part.strip():
+                st.markdown(part, unsafe_allow_html=True)
 
 def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     """Display rule in read-only viewer mode"""
@@ -1321,6 +1348,17 @@ def main():
                     st.error("Invalid JSON file format!")
                 except Exception as e:
                     st.error(f"Error reading file: {str(e)}")
+        
+        st.markdown("---")
+        if st.button("Regenerate Rule Settings", key="regen_rule_settings", type="primary"):
+            import subprocess
+            result = subprocess.run(["python", "scripts/rule_extractor.py"], capture_output=True, text=True)
+            if result.returncode == 0:
+                st.success("Rule settings regenerated successfully!")
+                st.code(result.stdout)
+            else:
+                st.error("Failed to regenerate rule settings.")
+                st.code(result.stderr)
     
     # Footer
     st.markdown("---")

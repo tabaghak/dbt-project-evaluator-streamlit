@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+
+# Virtual environments
+.venv/
+
+# Streamlit secrets (IMPORTANT: Keep credentials secure)
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+
+# Logs
+*.log

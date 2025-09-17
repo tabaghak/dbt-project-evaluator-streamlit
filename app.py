@@ -16,6 +16,8 @@ from io import StringIO
 import pandas as pd
 import os
 import re
+import subprocess
+import sys
 from cryptography.hazmat.primitives import serialization
 import plotly.graph_objects as go
 import plotly.express as px
@@ -31,89 +33,141 @@ except ImportError:
 # Environment detection
 IS_SNOWFLAKE_NATIVE = False
 try:
-    # Multiple ways to detect Snowflake Native environment
-    # Method 1: Check for Snowflake-specific environment variables
-    if (os.environ.get("SNOWFLAKE_STREAMLIT") == "1" or 
-        os.environ.get("SNOWFLAKE_HOST") or 
-        os.environ.get("SNOWFLAKE_ACCOUNT") or
-        os.environ.get("STREAMLIT_SERVER_PORT") == "8080"):  # Snowflake Native typically uses port 8080
+    # Method 1: Check for explicit Snowflake Streamlit indicator (most reliable)
+    if os.environ.get("SNOWFLAKE_STREAMLIT") == "1":
         IS_SNOWFLAKE_NATIVE = True
     
-    # Method 2: Check if we can create a snowflake connection without explicit config
-    if not IS_SNOWFLAKE_NATIVE:
-        try:
-            import streamlit as st_test
-            # Try to access the connection without errors
-            test_conn = st_test.connection("snowflake")
-            if test_conn:
-                # Additional check: see if we can get connection info
+    # Method 2: Check for specific Snowflake Native App environment patterns
+    elif (os.environ.get("SNOWFLAKE_HOST") and 
+          os.environ.get("SNOWFLAKE_ACCOUNT") and
+          # Additional check: Snowflake Native typically runs on specific ports
+          (os.environ.get("STREAMLIT_SERVER_PORT") == "8080" or 
+           os.environ.get("SERVER_PORT") == "8080")):
+        IS_SNOWFLAKE_NATIVE = True
+    
+    # Method 3: Test for Snowflake Native by connection capability
+    # Use more specific local environment indicators
+    else:
+        # Check for definitive local development indicators
+        is_local_environment = False
+        
+        # Check for local development specific indicators
+        if (os.environ.get("STREAMLIT_SERVER_ADDRESS") or           # Local streamlit server
+            os.path.exists(".streamlit/config.toml") or            # Local streamlit config
+            os.path.exists(".env") or                              # Local env file
+            os.path.exists(".venv") or                             # Local virtual environment
+            os.path.exists("venv") or                              # Local virtual environment
+            os.path.exists(".git")):                               # Local git repository
+            is_local_environment = True
+        
+        # Check for Snowflake config files that indicate local setup
+        home_dir = os.path.expanduser("~")
+        snowflake_config_paths = [
+            os.path.join(home_dir, ".snowflake", "connections"),
+            os.path.join(home_dir, ".snowsql", "config"),
+            os.path.join(home_dir, ".snowflake", "config"),
+        ]
+        
+        for config_path in snowflake_config_paths:
+            if os.path.exists(config_path):
+                is_local_environment = True
+                break
+        
+        # Only proceed with connection test if we don't have strong local indicators
+        if not is_local_environment:
+            try:
+                # Import streamlit to test connection capability
+                import streamlit as st_test
+                
+                # Check for local secrets - if we have them, we're definitely local
+                has_local_secrets = False
                 try:
-                    conn_info = test_conn._instance
-                    if conn_info:
-                        IS_SNOWFLAKE_NATIVE = True
+                    if "connections" in st_test.secrets and "snowflake" in st_test.secrets.connections:
+                        has_local_secrets = True
                 except:
                     pass
-        except Exception:
-            pass
-    
-    # Method 3: Check if streamlit is running in a Snowflake context
-    if not IS_SNOWFLAKE_NATIVE:
-        try:
-            # Look for Snowflake-specific modules or contexts
-            import sys
-            for module_name in sys.modules:
-                if 'snowflake' in module_name.lower() and 'streamlit' in module_name.lower():
-                    IS_SNOWFLAKE_NATIVE = True
-                    break
-        except Exception:
-            pass
+                
+                # Only test connection if we don't have local secrets
+                if not has_local_secrets:
+                    try:
+                        # Try to create a snowflake connection
+                        test_conn = st_test.connection("snowflake")
+                        if test_conn:
+                            # Try a simple query
+                            test_result = test_conn.query("SELECT CURRENT_USER() as current_user", ttl=0)
+                            if test_result is not None and not test_result.empty:
+                                # Success without local indicators = likely Snowflake Native
+                                IS_SNOWFLAKE_NATIVE = True
+                    except:
+                        # Connection failed, not Snowflake Native
+                        pass
+            except:
+                # Can't test connection, not Snowflake Native
+                pass
             
 except Exception:
     pass
 
-# Force Snowflake Native mode for testing (can be removed later)
-# Uncomment the next line when testing in actual Snowflake environment
-# IS_SNOWFLAKE_NATIVE = True
-
 # Custom CSS for better styling
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #FF6B35;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .category-header {
-        color: #4A90E2;
-        border-bottom: 2px solid #4A90E2;
-        padding-bottom: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .rule-panel {
-        border: 1px solid #e0e0e0;
-        border-radius: 10px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        background-color: #f8f9fa;
-    }
-    .tab-content {
-        min-height: 200px;
-        padding: 1rem;
-    }
-    .button-container {
-        display: flex;
-        gap: 10px;
-        margin-top: 1rem;
-    }
-    .success-message {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .error-message {
-        color: #dc3545;
-        font-weight: bold;
-    }
+/* Remove the extra top gap for the main content area */
+div.block-container,
+section.main > div.block-container {
+    padding-top: 0rem !important;
+    margin-top: 0rem !important;
+}
+
+/* Header wrapper to enforce centering */
+.header-wrapper {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding-top: 0rem !important;
+    margin-top: 0rem !important;
+}
+
+/* Main header styling */
+.main-header {
+    font-size: 2.5rem;
+    color: #FF6B35;
+    margin: 0 0 1rem 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-align: center;
+}
+.category-header {
+    color: #4A90E2;
+    border-bottom: 2px solid #4A90E2;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+}
+.rule-panel {
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background-color: #f8f9fa;
+}
+.tab-content {
+    min-height: 200px;
+    padding: 1rem;
+}
+.button-container {
+    display: flex;
+    gap: 10px;
+    margin-top: 1rem;
+}
+.success-message {
+    color: #28a745;
+    font-weight: bold;
+}
+.error-message {
+    color: #dc3545;
+    font-weight: bold;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -122,7 +176,64 @@ JSON_FILE_PATH = "config/dbt_project_evaluator_rules.json"
 
 @st.cache_data
 def load_rules_data() -> Dict[str, Any]:
-    """Load rules data from JSON file"""
+    """Load rules data from JSON file. If file doesn't exist, run rule extractor script or generate in memory."""
+    
+    # Check if the config file exists
+    if not os.path.exists(JSON_FILE_PATH):
+        
+        # In Snowflake Native Apps, subprocess calls don't work the same way
+        if IS_SNOWFLAKE_NATIVE:
+            st.warning("⚠️ Config file not found in Snowflake Native App environment.")
+            st.info("📋 Please ensure the dbt_project_evaluator_rules.json file is included in your app package, or upload it manually through the Rule Settings.")
+            
+            # Return a minimal structure to allow the app to function
+            return {
+                "Setup Required": {
+                    "rules": {
+                        "setup_required": {
+                            "name": "Configuration Required",
+                            "description": "Please upload or configure the rules data file.",
+                            "example": "Use the Rule Settings tab to import a rules configuration file.",
+                            "exception": "This is a setup message, not an actual rule.",
+                            "reason_to_flag": "Rules data file is missing.",
+                            "remediation": "Go to Rule Settings and import a dbt_project_evaluator_rules.json file, or ensure the file is included in your Snowflake Native App package."
+                        }
+                    }
+                }
+            }
+        
+        st.info(f"Config file {JSON_FILE_PATH} not found. Generating rules data...")
+        
+        # Try to run the rule extractor script (local environment only)
+        script_path = "scripts/rule_extractor.py"
+        
+        if os.path.exists(script_path):
+            try:
+                # Run the rule extractor script
+                result = subprocess.run([sys.executable, script_path], 
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=300)  # 5 minute timeout
+                
+                if result.returncode == 0:
+                    st.success("Rules data generated successfully!")
+                    # Clear the cache to reload data after generation
+                    st.cache_data.clear()
+                else:
+                    st.error(f"Rule extractor script failed with error: {result.stderr}")
+                    return {}
+                    
+            except subprocess.TimeoutExpired:
+                st.error("Rule extractor script timed out after 5 minutes")
+                return {}
+            except Exception as e:
+                st.error(f"Error running rule extractor script: {str(e)}")
+                return {}
+        else:
+            st.error(f"Rule extractor script not found: {script_path}")
+            return {}
+    
+    # Load the rules data (either existing or newly generated)
     try:
         with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -142,6 +253,59 @@ def save_rules_data(data: Dict[str, Any]) -> bool:
         return True
     except Exception as e:
         dismissible_error(f"Error saving rules: {str(e)}", key="save_rules_error")
+        return False
+
+def regenerate_rules_data() -> bool:
+    """
+    Regenerate rules data by running the rule extractor script.
+    Returns True if successful, False otherwise.
+    """
+    # In Snowflake Native Apps, subprocess calls are restricted
+    if IS_SNOWFLAKE_NATIVE:
+        st.error("❌ Rule regeneration is not available in Snowflake Native App environment.")
+        st.info("💡 **Alternative options:**")
+        st.markdown("""
+        1. **Import rules file**: Use the Import tab above to upload a pre-generated rules file
+        2. **Include in package**: Ensure the `config/dbt_project_evaluator_rules.json` file is included in your Snowflake Native App package
+        3. **Generate locally**: Run the rule extractor script in a local environment and include the output file
+        """)
+        return False
+    
+    script_path = "scripts/rule_extractor.py"
+    
+    if not os.path.exists(script_path):
+        st.error(f"Rule extractor script not found: {script_path}")
+        return False
+    
+    try:
+        with st.spinner("Regenerating rules data..."):
+            result = subprocess.run([sys.executable, script_path], 
+                                  capture_output=True, 
+                                  text=True, 
+                                  timeout=300)  # 5 minute timeout
+        
+        if result.returncode == 0:
+            st.success("✅ Rule settings regenerated successfully!")
+            
+            # Show output in an expander for details
+            with st.expander("View Generation Details"):
+                st.code(result.stdout, language="text")
+            
+            # Clear cache to reload the new data
+            st.cache_data.clear()
+            
+            return True
+        else:
+            st.error("❌ Failed to regenerate rule settings.")
+            st.error("Error details:")
+            st.code(result.stderr, language="text")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        st.error("❌ Rule generation timed out after 5 minutes")
+        return False
+    except Exception as e:
+        st.error(f"❌ Error running rule extractor script: {str(e)}")
         return False
 
 def generate_rule_id(name: str) -> str:
@@ -526,10 +690,10 @@ def get_available_schemas(database: str) -> list:
 
 # Unified query execution for both environments
 
-def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
+def execute_snowflake_query(query: str, suppress_errors: bool = False) -> Optional[pd.DataFrame]:
     """Execute a query on Snowflake and return results as DataFrame (supports both local and Snowflake Native)"""
-    # Check if we're in forced Snowflake Native mode or actual Snowflake Native
-    is_snowflake_mode = IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)
+    # Check if we're in Snowflake Native mode
+    is_snowflake_mode = IS_SNOWFLAKE_NATIVE
     
     if is_snowflake_mode:
         try:
@@ -537,14 +701,26 @@ def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
             df = conn.query(query, ttl=600)
             return df
         except Exception as e:
-            st.error(f"Query execution failed (Snowflake Native): {str(e)}")
-            # Additional debugging for Snowflake Native
-            st.error("Debug: Please ensure you have configured the Snowflake connection in your Streamlit app settings.")
+            if not suppress_errors:
+                error_msg = str(e).lower()
+                if "does not exist" in error_msg or "object" in error_msg:
+                    # Extract table name from query for better error message
+                    table_match = re.search(r'FROM\s+([^\s]+)', query, re.IGNORECASE)
+                    table_name = table_match.group(1) if table_match else "table"
+                    
+                    # Use session state to track if we've already shown this error
+                    error_key = f"error_shown_{table_name}"
+                    if error_key not in st.session_state:
+                        st.session_state[error_key] = True
+                        st.error(f"❌ Table not found: `{table_name}` - Please check if you've selected the correct database and schema containing dbt Project Evaluator results.")
+                else:
+                    st.error(f"Query execution failed (Snowflake Native): {str(e)}")
             return None
     else:
         # Local/manual connection
         if not st.session_state.get("snowflake_connected"):
-            dismissible_warning("Not connected to Snowflake", key="not_connected_warning")
+            if not suppress_errors:
+                dismissible_warning("Not connected to Snowflake", key="not_connected_warning")
             return None
         try:
             conn = st.session_state.snowflake_conn
@@ -556,7 +732,21 @@ def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
             cursor.close()
             return df
         except Exception as e:
-            st.error(f"Query execution failed: {str(e)}")
+            if not suppress_errors:
+                error_msg = str(e).lower()
+                if "does not exist" in error_msg or "object" in error_msg:
+                    # Extract table name from query for better error message
+                    table_match = re.search(r'FROM\s+([^\s]+)', query, re.IGNORECASE)
+                    table_name = table_match.group(1) if table_match else "table"
+                    
+                    # Use session state to track if we've already shown this error
+                    error_key = f"error_shown_{table_name}"
+                    if error_key not in st.session_state:
+                        st.session_state[error_key] = True
+                        st.error(f"❌ Table not found: `{table_name}` - Please check if you've selected the correct database and schema containing dbt Project Evaluator results.")
+                else:
+                    st.error(f"Query execution failed: {str(e)}")
+            return None
             return None
 
 # Helper to build fully qualified table name
@@ -569,7 +759,7 @@ def fq_table(table: str) -> str:
 
 def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
     """Get emoji and title based on violations count"""
-    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
         return f"🔍 {rule_name}"
     
     # Check if violations data is already loaded
@@ -601,7 +791,7 @@ def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
 
 def preload_violations_for_rules(rules_data: Dict[str, Any]):
     """Preload violations data for all rules if connected to Snowflake"""
-    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
         return
     
     # Only preload if not already done in this session
@@ -638,7 +828,7 @@ def preload_violations_for_rules(rules_data: Dict[str, Any]):
         st.session_state["violations_preloaded"] = True
         status_text.empty()
         progress_bar.empty()
-        dismissible_success(f"Loaded violations data for {total_rules} rules!")
+        # dismissible_success(f"Loaded violations data for {total_rules} rules!")
 
 def calculate_dashboard_metrics(rules_data: Dict[str, Any]) -> Dict[str, Any]:
     """Calculate metrics for the dashboard overview"""
@@ -651,7 +841,7 @@ def calculate_dashboard_metrics(rules_data: Dict[str, Any]) -> Dict[str, Any]:
         "violation_details": {}
     }
     
-    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
         return metrics
     
     # Calculate totals
@@ -682,17 +872,64 @@ def calculate_dashboard_metrics(rules_data: Dict[str, Any]) -> Dict[str, Any]:
     
     return metrics
 
+def validate_database_connection() -> bool:
+    """Validate that the required dbt Project Evaluator tables exist in the selected database/schema"""
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
+        return False
+    
+    # Test for key tables that the dashboard requires
+    required_tables = [
+        'FCT_DOCUMENTATION_COVERAGE',
+        'FCT_TEST_COVERAGE', 
+        'INT_ALL_GRAPH_RESOURCES'
+    ]
+    
+    for table in required_tables:
+        try:
+            test_query = f"SELECT 1 FROM {fq_table(table)} LIMIT 1"
+            result = execute_snowflake_query(test_query, suppress_errors=True)
+            if result is None:
+                return False
+        except:
+            return False
+    
+    return True
+
+def clear_all_cached_data():
+    """Clear all cached violations data and related session state"""
+    # Clear violations cache
+    keys_to_remove = [key for key in st.session_state.keys() if isinstance(key, str) and key.startswith('violations_')]
+    for key in keys_to_remove:
+        del st.session_state[key]
+    
+    # Clear error tracking
+    error_keys = [key for key in st.session_state.keys() if isinstance(key, str) and key.startswith('error_shown_')]
+    for key in error_keys:
+        del st.session_state[key]
+    
+    # Reset preload flag
+    st.session_state["violations_preloaded"] = False
+
 def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
     """Display the overview dashboard similar to the provided image"""
-    st.markdown('<h1 class="main-header">📊 Project Health Overview</h1>', unsafe_allow_html=True)
-    
-    # Calculate metrics
-    metrics = calculate_dashboard_metrics(rules_data)
-    
-    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
+    st.markdown('<div class="header-wrapper"><h1 class="main-header">📊 Project Health Overview</h1></div>', unsafe_allow_html=True)
+
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
         st.warning("🔌 Connect to Snowflake to see live project health metrics")
         st.info("The dashboard will show rule violations and project statistics once connected.")
         return
+    
+    # Validate database connection and required tables FIRST
+    if not validate_database_connection():
+        # Clear all cached data since we can't validate the database
+        clear_all_cached_data()
+        st.error("❌ Required dbt Project Evaluator tables not found in the selected database and schema.")
+        st.info("💡 Please ensure you've selected the correct database and schema containing dbt Project Evaluator results.")
+        st.info("📋 Required tables: FCT_DOCUMENTATION_COVERAGE, FCT_TEST_COVERAGE, INT_ALL_GRAPH_RESOURCES")
+        return
+    
+    # Calculate metrics only after validation passes
+    metrics = calculate_dashboard_metrics(rules_data)
     
     # Project Health Overview Cards
     
@@ -704,7 +941,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         doc_status = "No Data"
         try:
             doc_query = f"SELECT * FROM {fq_table('FCT_DOCUMENTATION_COVERAGE')} ORDER BY MEASURED_AT DESC LIMIT 1"
-            doc_df = execute_snowflake_query(doc_query)
+            doc_df = execute_snowflake_query(doc_query, suppress_errors=True)
             if doc_df is not None and not doc_df.empty:
                 # Assuming the coverage is in a column - adjust column name as needed
                 coverage_columns = [col for col in doc_df.columns if 'COVERAGE' in col.upper() or 'PCT' in col.upper() or 'PERCENT' in col.upper()]
@@ -718,9 +955,12 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
                     if len(numeric_cols) > 0:
                         doc_coverage = float(doc_df[numeric_cols[0]].iloc[0]) * 100 if doc_df[numeric_cols[0]].iloc[0] <= 1 else float(doc_df[numeric_cols[0]].iloc[0])
                 doc_status = "Good" if doc_coverage > 80 else "Needs Improvement"
+            else:
+                doc_coverage = 0
+                doc_status = "No Data"
         except Exception as e:
             doc_coverage = 0
-            doc_status = f"Error: {str(e)}"
+            doc_status = "No Data"
         
         # Create doughnut chart for documentation coverage
         doc_color = "#2e7d32" if doc_coverage > 80 else "#c62828"
@@ -771,7 +1011,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         test_status = "No Data"
         try:
             test_query = f"SELECT * FROM {fq_table('FCT_TEST_COVERAGE')} ORDER BY MEASURED_AT DESC LIMIT 1"
-            test_df = execute_snowflake_query(test_query)
+            test_df = execute_snowflake_query(test_query, suppress_errors=True)
             if test_df is not None and not test_df.empty:
                 # Look for coverage columns
                 coverage_columns = [col for col in test_df.columns if 'COVERAGE' in col.upper() or 'PCT' in col.upper() or 'PERCENT' in col.upper()]
@@ -785,9 +1025,12 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
                     if len(numeric_cols) > 0:
                         test_coverage = float(test_df[numeric_cols[0]].iloc[0]) * 100 if test_df[numeric_cols[0]].iloc[0] <= 1 else float(test_df[numeric_cols[0]].iloc[0])
                 test_status = "Good" if test_coverage > 80 else "Needs Improvement"
+            else:
+                test_coverage = 0
+                test_status = "No Data"
         except Exception as e:
             test_coverage = 0
-            test_status = f"Error: {str(e)}"
+            test_status = "No Data"
         
         # Create doughnut chart for test coverage
         test_color = "#2e7d32" if test_coverage > 80 else "#c62828"
@@ -838,7 +1081,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         model_status = "No Data"
         try:
             models_query = f"SELECT COUNT(1) AS models FROM {fq_table('INT_ALL_GRAPH_RESOURCES')} WHERE resource_type = 'model'"
-            models_df = execute_snowflake_query(models_query)
+            models_df = execute_snowflake_query(models_query, suppress_errors=True)
             if models_df is not None and models_df.empty == False:
                 total_models = int(models_df['MODELS'].iloc[0])
                 if total_models > 100:
@@ -1003,7 +1246,7 @@ def display_snowflake_connection_sidebar():
     connection_established = False
     
     # Determine connection status
-    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
+    if IS_SNOWFLAKE_NATIVE:
         # Test the connection to make sure it works
         try:
             test_query = "SELECT CURRENT_USER() as current_user"
@@ -1038,7 +1281,7 @@ def display_snowflake_connection_sidebar():
             selected_database = st.sidebar.selectbox(
                 "📊 Database",
                 databases,
-                index=current_db_index,
+                index=databases.index("DBT_SOURCE_PROJECT_EVAL") if "DBT_SOURCE_PROJECT_EVAL" in databases else current_db_index,
                 key="database_selector"
             )
             
@@ -1047,6 +1290,8 @@ def display_snowflake_connection_sidebar():
                 st.session_state.selected_database = selected_database
                 # Reset schema selection when database changes
                 st.session_state.selected_schema = None
+                # Clear all cached data when database changes
+                clear_all_cached_data()
                 st.rerun()
             
             # Get available schemas for selected database
@@ -1067,18 +1312,15 @@ def display_snowflake_connection_sidebar():
                 selected_schema = st.sidebar.selectbox(
                     "📋 Schema (or selected iteration)",
                     schemas,
-                    index=current_schema_index,
+                    index=schemas.index('RESULTS') if 'RESULTS' in schemas else current_schema_index,
                     key="schema_selector"
                 )
                 
                 # Update session state if schema changed
                 if selected_schema != st.session_state.selected_schema:
                     st.session_state.selected_schema = selected_schema
-                    # Clear violations cache when schema changes
-                    keys_to_remove = [key for key in st.session_state.keys() if isinstance(key, str) and key.startswith('violations_')]
-                    for key in keys_to_remove:
-                        del st.session_state[key]
-                    st.session_state["violations_preloaded"] = False
+                    # Clear all cached data when schema changes
+                    clear_all_cached_data()
                     st.rerun()
                 
             else:
@@ -1091,73 +1333,28 @@ def display_snowflake_connection_sidebar():
     # Snowflake Connection section (now appears second)
     st.sidebar.subheader("🏔️ Snowflake Connection")
 
-    # Debug information (can be hidden in production)
-    if st.sidebar.checkbox("Show Debug Info", value=False):
-        st.sidebar.text(f"IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
-        st.sidebar.text(f"SNOWFLAKE_STREAMLIT: {os.environ.get('SNOWFLAKE_STREAMLIT', 'Not set')}")
-        st.sidebar.text(f"SNOWFLAKE_HOST: {os.environ.get('SNOWFLAKE_HOST', 'Not set')}")
-        st.sidebar.text(f"SNOWFLAKE_ACCOUNT: {os.environ.get('SNOWFLAKE_ACCOUNT', 'Not set')}")
-        st.sidebar.text(f"STREAMLIT_SERVER_PORT: {os.environ.get('STREAMLIT_SERVER_PORT', 'Not set')}")
-
-    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
-        if st.session_state.get('force_snowflake_native', False):
-            st.sidebar.warning("🧪 Testing: Snowflake Native Mode (Forced)")
-        else:
-            st.sidebar.success("✅ Connected via Snowflake Native App session")
-        st.sidebar.info("Manual connection is disabled in Snowflake Native Apps.")
-        
-        # Test the connection to make sure it works
-        try:
-            test_query = "SELECT CURRENT_USER() as current_user"
-            test_result = execute_snowflake_query(test_query)
-            if test_result is not None and not test_result.empty:
-                current_user = test_result.iloc[0]['CURRENT_USER']
-                st.sidebar.info(f"Connected as: {current_user}")
-                connection_established = True
-            else:
-                st.sidebar.warning("⚠️ Connection test failed - please check your Snowflake connection configuration.")
-                st.sidebar.info("Debug: Trying to connect with st.connection('snowflake')")
-        except Exception as e:
-            st.sidebar.error(f"Connection test error: {str(e)}")
-            st.sidebar.error("Please ensure your Streamlit app has access to Snowflake and the required database/schema.")
-            # Show more detailed debug info
-            st.sidebar.info(f"Debug - IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
-            st.sidebar.info("Debug: Make sure you have configured the Snowflake connection in your app.")
-
-    elif st.session_state.get("snowflake_connected"):
-        connection_type = "🔐 Secrets Configuration" if st.session_state.get("secrets_connected") else "🔧 Manual Configuration"
-        st.sidebar.success(f"✅ Connected ({connection_type})")
-        if st.sidebar.button("Disconnect"):
-            if st.session_state.snowflake_conn:
-                st.session_state.snowflake_conn.close()
-            st.session_state.snowflake_connected = False
-            st.session_state.snowflake_conn = None
-            st.session_state.secrets_connected = False
-            st.rerun()
-        connection_established = True
-    else:
-        st.sidebar.info("Connect to view violations data")
-        
+    # Manual connection form - show right after header when needed
+    if not IS_SNOWFLAKE_NATIVE and not st.session_state.get("snowflake_connected"):
         # Check if secrets.toml is configured
         secrets_available = False
         try:
             if "connections" in st.secrets and "snowflake" in st.secrets.connections:
                 secrets_available = True
-                st.sidebar.info("📋 Found secrets.toml configuration")
-                if st.sidebar.button("🔐 Connect using secrets.toml"):
-                    if try_secrets_connection():
-                        dismissible_success("Connected using secrets.toml!", key="secrets_connection_success")
-                        st.rerun()
         except:
             pass
         
-        # Display secrets error if any
-        if hasattr(st.session_state, 'secrets_error'):
-            st.sidebar.error(f"🔍 Secrets issue: {st.session_state.secrets_error}")
-            st.sidebar.markdown("---")
+        # Show prominent message when manual credentials are needed
+        if not secrets_available:
+            st.sidebar.warning("🔐 Manual Snowflake credentials required")
         
-        # Manual connection form
-        with st.sidebar.expander("🔧 Manual Connection", expanded=not secrets_available):
+        # Manual connection form - expanded by default if no other connection options
+        form_title = "🔧 Manual Connection" if secrets_available else "🔐 Enter Snowflake Credentials"
+        with st.sidebar.expander(form_title, expanded=not secrets_available):
+            # Show helpful message when this is the primary connection method
+            if not secrets_available:
+                st.markdown("**Required:** Please provide your Snowflake connection details to access the application features.")
+                st.markdown("---")
+            
             # Authentication method selection
             auth_method = st.selectbox(
                 "Authentication Method",
@@ -1224,13 +1421,66 @@ def display_snowflake_connection_sidebar():
             
             if not connect_enabled:
                 st.caption("⚠️ Please fill in all required fields to connect.")
+
+    # Debug information (can be hidden in production)
+    # if st.sidebar.checkbox("Show Debug Info", value=False):
+    #     st.sidebar.text(f"IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
+    #     st.sidebar.text(f"SNOWFLAKE_STREAMLIT: {os.environ.get('SNOWFLAKE_STREAMLIT', 'Not set')}")
+    #     st.sidebar.text(f"SNOWFLAKE_HOST: {os.environ.get('SNOWFLAKE_HOST', 'Not set')}")
+    #     st.sidebar.text(f"SNOWFLAKE_ACCOUNT: {os.environ.get('SNOWFLAKE_ACCOUNT', 'Not set')}")
+    #     st.sidebar.text(f"STREAMLIT_SERVER_PORT: {os.environ.get('STREAMLIT_SERVER_PORT', 'Not set')}")
+
+    if IS_SNOWFLAKE_NATIVE:
+        st.sidebar.success("✅ Connected via Snowflake Native App session")
+        st.sidebar.info("Manual connection is disabled in Snowflake Native Apps.")
         
-        # Manual override toggle for testing Snowflake Native behavior
-        if st.sidebar.checkbox("🧪 Force Snowflake Native Mode (Testing)", value=False, help="Enable this to test Snowflake Native behavior locally"):
-            st.session_state['force_snowflake_native'] = True
-            st.sidebar.info("⚠️ Snowflake Native mode forced for testing")
-        else:
-            st.session_state['force_snowflake_native'] = False
+        # Test the connection to make sure it works
+        try:
+            test_query = "SELECT CURRENT_USER() as current_user"
+            test_result = execute_snowflake_query(test_query)
+            if test_result is not None and not test_result.empty:
+                current_user = test_result.iloc[0]['CURRENT_USER']
+                st.sidebar.info(f"Connected as: {current_user}")
+                connection_established = True
+            else:
+                st.sidebar.warning("⚠️ Connection test failed - please check your Snowflake connection configuration.")
+                st.sidebar.info("Debug: Trying to connect with st.connection('snowflake')")
+        except Exception as e:
+            st.sidebar.error(f"Connection test error: {str(e)}")
+            st.sidebar.error("Please ensure your Streamlit app has access to Snowflake and the required database/schema.")
+            # Show more detailed debug info
+            st.sidebar.info(f"Debug - IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
+            st.sidebar.info("Debug: Make sure you have configured the Snowflake connection in your app.")
+
+    elif st.session_state.get("snowflake_connected"):
+        connection_type = "🔐 Secrets Configuration" if st.session_state.get("secrets_connected") else "🔧 Manual Configuration"
+        st.sidebar.success(f"✅ Connected ({connection_type})")
+        if st.sidebar.button("Disconnect"):
+            if st.session_state.snowflake_conn:
+                st.session_state.snowflake_conn.close()
+            st.session_state.snowflake_connected = False
+            st.session_state.snowflake_conn = None
+            st.session_state.secrets_connected = False
+            st.rerun()
+        connection_established = True
+    else:
+        # Check if secrets.toml is configured and show secrets connection option
+        secrets_available = False
+        try:
+            if "connections" in st.secrets and "snowflake" in st.secrets.connections:
+                secrets_available = True
+                st.sidebar.info("📋 Found secrets.toml configuration")
+                if st.sidebar.button("🔐 Connect using secrets.toml"):
+                    if try_secrets_connection():
+                        dismissible_success("Connected using secrets.toml!", key="secrets_connection_success")
+                        st.rerun()
+        except:
+            pass
+        
+        # Display secrets error if any
+        if hasattr(st.session_state, 'secrets_error'):
+            st.sidebar.error(f"🔍 Secrets issue: {st.session_state.secrets_error}")
+            st.sidebar.markdown("---")
 
     return connection_established
 
@@ -1290,7 +1540,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     
     with tab6:
         
-        if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
+        if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE):
             st.info("Connect to Snowflake in the sidebar to view violations data")
         else:
             # Create the query
@@ -1322,24 +1572,47 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
                 if df.empty:
                     st.success("🎉 No violations found for this rule!")
                 else:
-                    st.warning(f"⚠️ Found {len(df)} violation(s)")
+                    # Remove empty rows more aggressively
+                    df_filtered = df.copy()
+                    
+                    # First remove rows where all values are NaN
+                    df_filtered = df_filtered.dropna(how='all')
+                    
+                    # Remove rows where all values are empty strings, whitespace, or common null representations
+                    if not df_filtered.empty:
+                        # Convert all columns to string and check for empty/null-like values
+                        def is_empty_row(row):
+                            for value in row:
+                                str_val = str(value).strip().lower()
+                                # Check if value is meaningful (not empty, null, none, nan, etc.)
+                                if str_val and str_val not in ['nan', 'none', 'null', '', 'na', '<na>']:
+                                    return False
+                            return True
+                        
+                        # Filter out empty rows
+                        df_filtered = df_filtered[~df_filtered.apply(is_empty_row, axis=1)]
+                    
+                    if df_filtered.empty:
+                        st.success("🎉 No violations found for this rule!")
+                    else:
+                        st.warning(f"⚠️ Found {len(df_filtered)} violation(s)")
+                                            
+                        # Display the filtered data table
+                        st.dataframe(
+                            df_filtered, 
+                            use_container_width=True,
+                            height=400
+                        )
                                         
-                    # Display the data table
-                    st.dataframe(
-                        df, 
-                        use_container_width=True,
-                        height=400
-                    )
-                                    
-                    # Add download button
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download as CSV",
-                        data=csv,
-                        file_name=f"violations_{rule_key}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+                        # Add download button for filtered data
+                        csv = df_filtered.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download as CSV",
+                            data=csv,
+                            file_name=f"violations_{rule_key}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
 
 def main():
     """Main application function"""
@@ -1353,7 +1626,7 @@ def main():
     
     # Don't show main header for dashboard (it has its own)
     if st.session_state.get('nav_mode') != "Dashboard":
-        st.markdown('<h1 class="main-header">📊 dbt Project Evaluator Results</h1>', unsafe_allow_html=True)
+        st.markdown('<br/><div class="header-wrapper"><h1 class="main-header">📊 dbt Project Evaluator Results</h1></div>', unsafe_allow_html=True)
     
     # Initialize Snowflake connection early
     init_snowflake_connection()
@@ -1452,7 +1725,7 @@ def main():
     snowflake_connected = display_snowflake_connection_sidebar()
     
     # For Snowflake Native, always consider connected
-    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
+    if IS_SNOWFLAKE_NATIVE:
         snowflake_connected = True
     
     # Preload violations if connected to Snowflake (only when not in Rule Settings or Dashboard needs them)
@@ -1480,6 +1753,18 @@ def main():
       
     elif st.session_state.nav_mode == "Rule Settings":
         st.subheader("Rule Settings - Export/Import")
+        
+        # Show environment-specific information
+        if IS_SNOWFLAKE_NATIVE:
+            st.info("🏔️ **Snowflake Native App Environment**")
+            st.markdown("""
+            In Snowflake Native Apps, rule regeneration requires the rules file to be:
+            - **Included in the app package** during deployment, or
+            - **Imported manually** using the Import tab below
+            
+            The automatic rule generation feature is not available due to Snowflake's security restrictions.
+            """)
+            st.markdown("---")
         
         tab1, tab2 = st.tabs(["Export", "Import"])
         
@@ -1562,15 +1847,14 @@ def main():
                     st.error(f"Error reading file: {str(e)}")
         
         st.markdown("---")
-        if st.button("Regenerate Rule Settings", key="regen_rule_settings", type="primary"):
-            import subprocess
-            result = subprocess.run(["python", "scripts/rule_extractor.py"], capture_output=True, text=True)
-            if result.returncode == 0:
-                st.success("Rule settings regenerated successfully!")
-                st.code(result.stdout)
-            else:
-                st.error("Failed to regenerate rule settings.")
-                st.code(result.stderr)
+        
+        # Only show regenerate button in local environments
+        if not IS_SNOWFLAKE_NATIVE:
+            if st.button("Regenerate Rule Settings", key="regen_rule_settings", type="primary"):
+                if regenerate_rules_data():
+                    # Optionally trigger a rerun to reload the updated data
+                    st.balloons()
+                    st.rerun()
     
     # Footer
     st.markdown("---")

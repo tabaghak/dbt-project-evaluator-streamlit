@@ -16,7 +16,6 @@ from io import StringIO
 import pandas as pd
 import os
 import re
-import streamlit_plotly_events as spe
 from cryptography.hazmat.primitives import serialization
 import plotly.graph_objects as go
 import plotly.express as px
@@ -32,19 +31,49 @@ except ImportError:
 # Environment detection
 IS_SNOWFLAKE_NATIVE = False
 try:
-    # Snowflake Native Streamlit sets this env var
-    if os.environ.get("SNOWFLAKE_STREAMLIT") == "1":
+    # Multiple ways to detect Snowflake Native environment
+    # Method 1: Check for Snowflake-specific environment variables
+    if (os.environ.get("SNOWFLAKE_STREAMLIT") == "1" or 
+        os.environ.get("SNOWFLAKE_HOST") or 
+        os.environ.get("SNOWFLAKE_ACCOUNT") or
+        os.environ.get("STREAMLIT_SERVER_PORT") == "8080"):  # Snowflake Native typically uses port 8080
         IS_SNOWFLAKE_NATIVE = True
+    
+    # Method 2: Check if we can create a snowflake connection without explicit config
+    if not IS_SNOWFLAKE_NATIVE:
+        try:
+            import streamlit as st_test
+            # Try to access the connection without errors
+            test_conn = st_test.connection("snowflake")
+            if test_conn:
+                # Additional check: see if we can get connection info
+                try:
+                    conn_info = test_conn._instance
+                    if conn_info:
+                        IS_SNOWFLAKE_NATIVE = True
+                except:
+                    pass
+        except Exception:
+            pass
+    
+    # Method 3: Check if streamlit is running in a Snowflake context
+    if not IS_SNOWFLAKE_NATIVE:
+        try:
+            # Look for Snowflake-specific modules or contexts
+            import sys
+            for module_name in sys.modules:
+                if 'snowflake' in module_name.lower() and 'streamlit' in module_name.lower():
+                    IS_SNOWFLAKE_NATIVE = True
+                    break
+        except Exception:
+            pass
+            
 except Exception:
     pass
 
-# Configure the page
-st.set_page_config(
-    page_title="dbt Project Evaluator Rules Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Force Snowflake Native mode for testing (can be removed later)
+# Uncomment the next line when testing in actual Snowflake environment
+# IS_SNOWFLAKE_NATIVE = True
 
 # Custom CSS for better styling
 st.markdown("""
@@ -167,7 +196,7 @@ def dismissible_error(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"🚨 {message}", key=f"dismiss_error_{key}", 
-                    type="secondary", width='stretch'):
+                    type="secondary", use_container_width=True):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -208,7 +237,7 @@ def dismissible_warning(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"⚠️ {message}", key=f"dismiss_warning_{key}", 
-                    type="secondary", width='stretch'):
+                    type="secondary", use_container_width=True):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -249,7 +278,7 @@ def dismissible_info(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"ℹ️ {message}", key=f"dismiss_info_{key}", 
-                    type="secondary", width='stretch'):
+                    type="secondary", use_container_width=True):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
@@ -290,13 +319,19 @@ def dismissible_success(message: str, key: Optional[str] = None) -> None:
         """, unsafe_allow_html=True)
         
         if st.button(f"✅ {message}", key=f"dismiss_success_{key}", 
-                    type="secondary", width='stretch'):
+                    type="secondary", use_container_width=True):
             st.session_state[f"dismissed_{key}"] = True
             st.rerun()
 
 @st.cache_resource
 def init_snowflake_connection():
     """Initialize Snowflake connection using Streamlit secrets or session state"""
+    if IS_SNOWFLAKE_NATIVE:
+        # In Snowflake Native apps, we're always "connected"
+        st.session_state.snowflake_connected = True
+        st.session_state.snowflake_conn = None  # Not needed for native apps
+        return True
+    
     if "snowflake_connected" not in st.session_state:
         st.session_state.snowflake_connected = False
         st.session_state.snowflake_conn = None
@@ -456,17 +491,55 @@ def connect_to_snowflake_manual(account: str, user: str, auth_method: str, **aut
 SESSION_DATABASE = "DBT_SOURCE_PROJECT_EVAL"
 SESSION_SCHEMA = "RESULTS"
 
+def get_current_session_info() -> tuple:
+    """Get current session database and schema"""
+    try:
+        query = "SELECT CURRENT_DATABASE() as current_db, CURRENT_SCHEMA() as current_schema"
+        df = execute_snowflake_query(query)
+        if df is not None and not df.empty:
+            return df.iloc[0]['CURRENT_DB'], df.iloc[0]['CURRENT_SCHEMA']
+    except Exception as e:
+        st.sidebar.error(f"Error getting session info: {str(e)}")
+    return SESSION_DATABASE, SESSION_SCHEMA
+
+def get_available_databases() -> list:
+    """Get list of available databases"""
+    try:
+        query = "SELECT database_name FROM SNOWFLAKE.INFORMATION_SCHEMA.DATABASES ORDER BY database_name"
+        df = execute_snowflake_query(query)
+        if df is not None and not df.empty:
+            return df['DATABASE_NAME'].tolist()
+    except Exception as e:
+        st.sidebar.error(f"Error getting databases: {str(e)}")
+    return []
+
+def get_available_schemas(database: str) -> list:
+    """Get list of available schemas for the selected database"""
+    try:
+        query = f"SELECT schema_name FROM {database}.INFORMATION_SCHEMA.SCHEMATA ORDER BY schema_name"
+        df = execute_snowflake_query(query)
+        if df is not None and not df.empty:
+            return df['SCHEMA_NAME'].tolist()
+    except Exception as e:
+        st.sidebar.error(f"Error getting schemas for {database}: {str(e)}")
+    return []
+
 # Unified query execution for both environments
 
 def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
     """Execute a query on Snowflake and return results as DataFrame (supports both local and Snowflake Native)"""
-    if IS_SNOWFLAKE_NATIVE:
+    # Check if we're in forced Snowflake Native mode or actual Snowflake Native
+    is_snowflake_mode = IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)
+    
+    if is_snowflake_mode:
         try:
             conn = st.connection("snowflake")
             df = conn.query(query, ttl=600)
             return df
         except Exception as e:
             st.error(f"Query execution failed (Snowflake Native): {str(e)}")
+            # Additional debugging for Snowflake Native
+            st.error("Debug: Please ensure you have configured the Snowflake connection in your Streamlit app settings.")
             return None
     else:
         # Local/manual connection
@@ -489,11 +562,14 @@ def execute_snowflake_query(query: str) -> Optional[pd.DataFrame]:
 # Helper to build fully qualified table name
 
 def fq_table(table: str) -> str:
-    return f"{SESSION_DATABASE}.{SESSION_SCHEMA}.{table}"
+    """Build fully qualified table name using session state database and schema"""
+    current_db = st.session_state.get('selected_database', SESSION_DATABASE)
+    current_schema = st.session_state.get('selected_schema', SESSION_SCHEMA)
+    return f"{current_db}.{current_schema}.{table}"
 
 def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
     """Get emoji and title based on violations count"""
-    if not st.session_state.get("snowflake_connected"):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
         return f"🔍 {rule_name}"
     
     # Check if violations data is already loaded
@@ -525,7 +601,7 @@ def get_rule_status_emoji(rule_key: str, rule_name: str) -> str:
 
 def preload_violations_for_rules(rules_data: Dict[str, Any]):
     """Preload violations data for all rules if connected to Snowflake"""
-    if not st.session_state.get("snowflake_connected"):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
         return
     
     # Only preload if not already done in this session
@@ -575,7 +651,7 @@ def calculate_dashboard_metrics(rules_data: Dict[str, Any]) -> Dict[str, Any]:
         "violation_details": {}
     }
     
-    if not st.session_state.get("snowflake_connected"):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
         return metrics
     
     # Calculate totals
@@ -613,7 +689,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
     # Calculate metrics
     metrics = calculate_dashboard_metrics(rules_data)
     
-    if not st.session_state.get("snowflake_connected"):
+    if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
         st.warning("🔌 Connect to Snowflake to see live project health metrics")
         st.info("The dashboard will show rule violations and project statistics once connected.")
         return
@@ -687,7 +763,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             ]
         )
         
-        st.plotly_chart(fig_doc, width='stretch')
+        st.plotly_chart(fig_doc, use_container_width=True)
     
     with col2:
         # Test Coverage - get real data from Snowflake and display as doughnut chart
@@ -754,7 +830,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             ]
         )
         
-        st.plotly_chart(fig_test, width='stretch')
+        st.plotly_chart(fig_test, use_container_width=True)
     
     with col3:
         # Total Models - get real data from Snowflake
@@ -836,7 +912,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
                 yaxis_title="Category"
             )
             
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.success("🎉 No violations found across all categories!")
     else:
@@ -860,7 +936,7 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
         for category in detail_df["Category"].unique():
             cat_data = detail_df[detail_df["Category"] == category]
             with st.expander(f"{category} ({cat_data['Violations'].sum()} violations)"):
-                st.dataframe(cat_data[["Rule", "Violations"]], hide_index=True, width='stretch')
+                st.dataframe(cat_data[["Rule", "Violations"]], hide_index=True, use_container_width=True)
     else:
         st.success("🎉 No rule violations detected!")
     
@@ -915,21 +991,140 @@ def display_dashboard_overview(rules_data: Dict[str, Any]) -> None:
             use_container_width=True
         )
 
-        st.dataframe(models_df, width='stretch', hide_index=True)
+        st.dataframe(models_df, use_container_width=True, hide_index=True)
     else:
         st.info("No model type data available.")
 
 def display_snowflake_connection_sidebar():
     """Display Snowflake connection form in sidebar"""
     st.sidebar.markdown("---")
+    
+    # First, check connection status to determine if we should show Database & Schema
+    connection_established = False
+    
+    # Determine connection status
+    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
+        # Test the connection to make sure it works
+        try:
+            test_query = "SELECT CURRENT_USER() as current_user"
+            test_result = execute_snowflake_query(test_query)
+            if test_result is not None and not test_result.empty:
+                connection_established = True
+        except Exception:
+            pass
+    elif st.session_state.get("snowflake_connected"):
+        connection_established = True
+
+    # Database and Schema selection (show first if connected)
+    if connection_established:
+        
+        # Initialize session state for database and schema if not exists
+        if 'selected_database' not in st.session_state or 'selected_schema' not in st.session_state:
+            # Get current session database and schema
+            current_db, current_schema = get_current_session_info()
+            st.session_state.selected_database = current_db
+            st.session_state.selected_schema = current_schema
+        
+        # Get available databases
+        with st.spinner("Loading databases..."):
+            databases = get_available_databases()
+        
+        if databases:
+            # Database selection
+            current_db_index = 0
+            if st.session_state.selected_database in databases:
+                current_db_index = databases.index(st.session_state.selected_database)
+            
+            selected_database = st.sidebar.selectbox(
+                "📊 Database",
+                databases,
+                index=current_db_index,
+                key="database_selector"
+            )
+            
+            # Update session state if database changed
+            if selected_database != st.session_state.selected_database:
+                st.session_state.selected_database = selected_database
+                # Reset schema selection when database changes
+                st.session_state.selected_schema = None
+                st.rerun()
+            
+            # Get available schemas for selected database
+            with st.spinner(f"Loading schemas for {selected_database}..."):
+                schemas = get_available_schemas(selected_database) if selected_database else []
+            
+            if schemas:
+                # Schema selection
+                current_schema_index = 0
+                if st.session_state.selected_schema and st.session_state.selected_schema in schemas:
+                    current_schema_index = schemas.index(st.session_state.selected_schema)
+                elif 'RESULTS' in schemas:
+                    current_schema_index = schemas.index('RESULTS')
+                    st.session_state.selected_schema = 'RESULTS'
+                elif schemas:
+                    st.session_state.selected_schema = schemas[0]
+                
+                selected_schema = st.sidebar.selectbox(
+                    "📋 Schema (or selected iteration)",
+                    schemas,
+                    index=current_schema_index,
+                    key="schema_selector"
+                )
+                
+                # Update session state if schema changed
+                if selected_schema != st.session_state.selected_schema:
+                    st.session_state.selected_schema = selected_schema
+                    # Clear violations cache when schema changes
+                    keys_to_remove = [key for key in st.session_state.keys() if isinstance(key, str) and key.startswith('violations_')]
+                    for key in keys_to_remove:
+                        del st.session_state[key]
+                    st.session_state["violations_preloaded"] = False
+                    st.rerun()
+                
+            else:
+                st.sidebar.warning(f"No schemas found in {selected_database}")
+        else:
+            st.sidebar.warning("No databases found")
+        
+        st.sidebar.markdown("---")
+
+    # Snowflake Connection section (now appears second)
     st.sidebar.subheader("🏔️ Snowflake Connection")
 
-    if IS_SNOWFLAKE_NATIVE:
-        st.sidebar.success("✅ Connected via Snowflake Native App session")
-        st.sidebar.info("Manual connection is disabled in Snowflake Native Apps.")
-        return True
+    # Debug information (can be hidden in production)
+    if st.sidebar.checkbox("Show Debug Info", value=False):
+        st.sidebar.text(f"IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
+        st.sidebar.text(f"SNOWFLAKE_STREAMLIT: {os.environ.get('SNOWFLAKE_STREAMLIT', 'Not set')}")
+        st.sidebar.text(f"SNOWFLAKE_HOST: {os.environ.get('SNOWFLAKE_HOST', 'Not set')}")
+        st.sidebar.text(f"SNOWFLAKE_ACCOUNT: {os.environ.get('SNOWFLAKE_ACCOUNT', 'Not set')}")
+        st.sidebar.text(f"STREAMLIT_SERVER_PORT: {os.environ.get('STREAMLIT_SERVER_PORT', 'Not set')}")
 
-    if st.session_state.get("snowflake_connected"):
+    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
+        if st.session_state.get('force_snowflake_native', False):
+            st.sidebar.warning("🧪 Testing: Snowflake Native Mode (Forced)")
+        else:
+            st.sidebar.success("✅ Connected via Snowflake Native App session")
+        st.sidebar.info("Manual connection is disabled in Snowflake Native Apps.")
+        
+        # Test the connection to make sure it works
+        try:
+            test_query = "SELECT CURRENT_USER() as current_user"
+            test_result = execute_snowflake_query(test_query)
+            if test_result is not None and not test_result.empty:
+                current_user = test_result.iloc[0]['CURRENT_USER']
+                st.sidebar.info(f"Connected as: {current_user}")
+                connection_established = True
+            else:
+                st.sidebar.warning("⚠️ Connection test failed - please check your Snowflake connection configuration.")
+                st.sidebar.info("Debug: Trying to connect with st.connection('snowflake')")
+        except Exception as e:
+            st.sidebar.error(f"Connection test error: {str(e)}")
+            st.sidebar.error("Please ensure your Streamlit app has access to Snowflake and the required database/schema.")
+            # Show more detailed debug info
+            st.sidebar.info(f"Debug - IS_SNOWFLAKE_NATIVE: {IS_SNOWFLAKE_NATIVE}")
+            st.sidebar.info("Debug: Make sure you have configured the Snowflake connection in your app.")
+
+    elif st.session_state.get("snowflake_connected"):
         connection_type = "🔐 Secrets Configuration" if st.session_state.get("secrets_connected") else "🔧 Manual Configuration"
         st.sidebar.success(f"✅ Connected ({connection_type})")
         if st.sidebar.button("Disconnect"):
@@ -939,7 +1134,7 @@ def display_snowflake_connection_sidebar():
             st.session_state.snowflake_conn = None
             st.session_state.secrets_connected = False
             st.rerun()
-        return True
+        connection_established = True
     else:
         st.sidebar.info("Connect to view violations data")
         
@@ -1020,7 +1215,7 @@ def display_snowflake_connection_sidebar():
                 connect_enabled = all([account, user, token, warehouse, database, schema])
             
             # Connect button
-            if st.button("Connect to Snowflake", disabled=not connect_enabled, width='stretch'):
+            if st.button("Connect to Snowflake", disabled=not connect_enabled, use_container_width=True):
                 if connect_to_snowflake_manual(account, user, auth_method, **auth_params):
                     dismissible_success("Connected successfully!", key="manual_connection_success")
                     st.rerun()
@@ -1030,7 +1225,14 @@ def display_snowflake_connection_sidebar():
             if not connect_enabled:
                 st.caption("⚠️ Please fill in all required fields to connect.")
         
-        return False
+        # Manual override toggle for testing Snowflake Native behavior
+        if st.sidebar.checkbox("🧪 Force Snowflake Native Mode (Testing)", value=False, help="Enable this to test Snowflake Native behavior locally"):
+            st.session_state['force_snowflake_native'] = True
+            st.sidebar.info("⚠️ Snowflake Native mode forced for testing")
+        else:
+            st.session_state['force_snowflake_native'] = False
+
+    return connection_established
 
 def render_markdown_with_images(md_text):
     """Render markdown and display images using st.image for local images with { width=... }, preserving image position."""
@@ -1088,7 +1290,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
     
     with tab6:
         
-        if not st.session_state.get("snowflake_connected"):
+        if not (st.session_state.get("snowflake_connected") or IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False)):
             st.info("Connect to Snowflake in the sidebar to view violations data")
         else:
             # Create the query
@@ -1104,7 +1306,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
             # Show query and refresh button
             col1, col2 = st.columns([1, 4])
             with col1:
-                if st.button(f"🔄 Refresh", key=f"refresh_{rule_key}", width='content'):
+                if st.button(f"🔄 Refresh", key=f"refresh_{rule_key}", use_container_width=True):
                     with st.spinner("Refreshing violations data..."):
                         df = execute_snowflake_query(query)
                         if df is not None:
@@ -1125,7 +1327,7 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
                     # Display the data table
                     st.dataframe(
                         df, 
-                        width='stretch',
+                        use_container_width=True,
                         height=400
                     )
                                     
@@ -1136,11 +1338,19 @@ def display_rule_viewer(rule_data: Dict[str, str], rule_key: str) -> None:
                         data=csv,
                         file_name=f"violations_{rule_key}.csv",
                         mime="text/csv",
-                        width='stretch'
+                        use_container_width=True
                     )
 
 def main():
     """Main application function"""
+    # Configure the page
+    st.set_page_config(
+        page_title="dbt Project Evaluator Rules Dashboard",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
     # Don't show main header for dashboard (it has its own)
     if st.session_state.get('nav_mode') != "Dashboard":
         st.markdown('<h1 class="main-header">📊 dbt Project Evaluator Results</h1>', unsafe_allow_html=True)
@@ -1181,7 +1391,7 @@ def main():
     
     if categories:
         # Dashboard button at the top
-        if st.sidebar.button("📊 Overview Dashboard", width='stretch',
+        if st.sidebar.button("📊 Overview Dashboard", use_container_width=True, 
                             type="primary" if st.session_state.nav_mode == "Dashboard" else "secondary"):
             st.session_state.nav_mode = "Dashboard"
             st.rerun()
@@ -1213,16 +1423,14 @@ def main():
             </style>
             """, unsafe_allow_html=True)
             
-            if st.sidebar.button(f"{emoji} {category}", width='stretch', 
+            if st.sidebar.button(f"{emoji} {category}", use_container_width=True, 
                                 key=f"nav_{category}",
                                 type=button_type):
                 st.session_state.selected_category = category
                 st.session_state.nav_mode = "View Rules"
                 st.rerun()
         
-        # Settings button at the bottom
-        st.sidebar.markdown("---")
-        if st.sidebar.button("⚙️ Rule Settings", width='stretch'):
+        if st.sidebar.button("⚙️ Rule Settings", use_container_width=True):
             st.session_state.nav_mode = "Rule Settings"
             st.rerun()
         
@@ -1242,6 +1450,10 @@ def main():
     
     # Add Snowflake connection sidebar
     snowflake_connected = display_snowflake_connection_sidebar()
+    
+    # For Snowflake Native, always consider connected
+    if IS_SNOWFLAKE_NATIVE or st.session_state.get('force_snowflake_native', False):
+        snowflake_connected = True
     
     # Preload violations if connected to Snowflake (only when not in Rule Settings or Dashboard needs them)
     if snowflake_connected and st.session_state.nav_mode in ["View Rules", "Dashboard"]:
@@ -1293,7 +1505,7 @@ def main():
                     data=json_string,
                     file_name=f"dbt_rules_export_{'-'.join(export_options)}.json",
                     mime="application/json",
-                    width='stretch'
+                    use_container_width=True
                 )
                 
                 with st.expander("Preview Export Data"):
